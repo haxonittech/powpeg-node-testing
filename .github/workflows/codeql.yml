@@ -1,0 +1,122 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches: [ "master", "*-rc" ]
+  pull_request:
+    branches: [ "master", "*-rc" ]
+  schedule:
+    - cron: "0 0 * * *"
+
+# Declare default permissions as read only.
+permissions: read-all
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ java ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+
+      - name: Setup Java JDK
+        if: ${{ matrix.language == 'java' }}
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 #v5.2.0
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Checkout RSKj repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          repository: rsksmart/rskj
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: rskj
+          fetch-depth: 0
+  
+      - name: Determine branch to checkout for PR
+        if: github.event_name == 'pull_request'
+        working-directory: rskj
+        env:
+          PR_BRANCH: ${{ github.head_ref }}
+        run: |
+          IS_RSKJ_BRANCH=$(git ls-remote --heads origin "$PR_BRANCH")
+          if test -n "${IS_RSKJ_BRANCH}"; then
+          echo "Found matching branch name in RSKj repo"
+          CHECKOUT_REF="$PR_BRANCH"
+          else
+          echo "Using master for RSKj"
+          CHECKOUT_REF="master"
+          fi
+          echo "CHECKOUT_REF=$CHECKOUT_REF" >> $GITHUB_ENV
+
+      - name: Determine branch to checkout for push
+        if: github.event_name != 'pull_request'
+        working-directory: rskj
+        env:
+          POW_REF: ${{ github.ref_name }}
+        run: |
+          IS_RSKJ_REF=$(git ls-remote --heads origin "$POW_REF")
+          if test -n "${IS_RSKJ_REF}"; then
+            echo "Found matching ref in RSKj"
+            CHECKOUT_REF="$POW_REF"
+          else
+            echo "Using master for RSKj"
+            CHECKOUT_REF="master"
+          fi
+          echo "CHECKOUT_REF=$CHECKOUT_REF" >> $GITHUB_ENV
+
+      - name: Check out appropriate rskj reference
+        working-directory: rskj
+        env:
+          CHECKOUT_REF: ${{ env.CHECKOUT_REF }}
+        run: |
+          git switch "$CHECKOUT_REF"
+
+      - name: Set DONT-COMMIT-settings.gradle
+        if: ${{ matrix.language == 'java' }}
+        run: |
+          cat <<'EOF' >DONT-COMMIT-settings.gradle
+          includeBuild('./rskj') {
+            dependencySubstitution {
+              all { DependencySubstitution dependency ->
+                if (dependency.requested instanceof ModuleComponentSelector
+                    && dependency.requested.group == 'co.rsk'
+                    && dependency.requested.module == 'rskj-core'
+                    && (dependency.requested.version.endsWith('SNAPSHOT') || dependency.requested.version.endsWith('RC'))) {
+                  def targetProject = project(":${dependency.requested.module}")
+                  if (targetProject != null) {
+                    println('---- USING LOCAL ' + dependency.requested.displayName + ' PROJECT ----')
+                    dependency.useTarget targetProject
+                  }
+                }
+              }
+            }
+          }
+          EOF
+  
+      - name: Before Index (java)
+        if: ${{ matrix.language == 'java' }}
+        run: ./configure.sh
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@5d4e8d1aca955e8d8589aabd499c5cae939e33c7 #v4.31.9
+        with:
+          languages: ${{ matrix.language }}
+          queries: +security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@5d4e8d1aca955e8d8589aabd499c5cae939e33c7 #v4.31.9
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@5d4e8d1aca955e8d8589aabd499c5cae939e33c7 #v4.31.9
+        with:
+          category: "/language:${{ matrix.language }}"

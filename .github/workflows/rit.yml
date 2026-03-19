@@ -1,0 +1,188 @@
+name: Rootstock Integration Tests
+
+on:
+  pull_request:
+    types: [ opened, synchronize, reopened ]
+    branches: [ "master", "*-rc" ]
+  workflow_dispatch:
+    inputs:
+      rit-branch:
+        description: 'Branch for Rootstock Integration Tests'
+        required: false
+        default: 'main'
+      rskj-branch:
+        description: 'Branch for RSKJ repo'
+        required: false
+        default: 'master'
+
+# Declare default permissions as read only.
+permissions: read-all
+
+jobs:
+  rootstock-integration-tests:
+    name: Rootstock Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Repository # Step needed to access the PR description using github CLI
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+
+
+      - name: Set Branch Variables
+        id: set-branch-variables
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          github_event_inputs_rskj_branch: ${{ github.event.inputs.rskj-branch }}
+          github_event_inputs_rit_branch: ${{ github.event.inputs.rit-branch }}
+          github_event_name: ${{ github.event_name }}
+          github_event_pull_request_number: ${{ github.event.pull_request.number }}
+          github_head_ref: ${{ github.head_ref }}
+          github_ref_name: ${{ github.ref_name }}
+          github_event_pull_request_head_repo_owner_login: ${{ github.event.pull_request.head.repo.owner.login }}
+          github_repository_owner: ${{ github.repository_owner }}
+        run: |
+          PR_DESCRIPTION=pr-description.txt
+
+          ALLOWED_BRANCH_CHARACTERS='[-+./0-9A-Z_a-z]'
+
+          default_rskj_branch=master
+          default_powpeg_branch=master
+          default_rit_branch=main
+
+          get_branch_from_description()
+          {
+            _prefix=$1
+
+            # On lines matching "`$_prefix:...`", replace the lines with the
+            # thing in ... and print the result.
+            _search_re='\@`'$_prefix:$ALLOWED_BRANCH_CHARACTERS'\{1,\}`@'
+            _replace_re='s@.*`'$_prefix:'\('$ALLOWED_BRANCH_CHARACTERS'\{1,\}\)`.*@\1@p'
+            _branch=$(sed -n "$_search_re $_replace_re" "$PR_DESCRIPTION")
+            echo "$_branch"
+          }
+
+          is_valid_branch_name()
+          {
+            echo "$1" | grep -qx "$ALLOWED_BRANCH_CHARACTERS\\{1,\\}"
+          }
+
+          if [ "$github_event_name" = workflow_dispatch ]; then
+            POWPEG_BRANCH=$github_ref_name
+            RSKJ_BRANCH=${github_event_inputs_rskj_branch:-$default_rskj_branch}
+            RIT_BRANCH=${github_event_inputs_rit_branch:-$default_rit_branch}
+          elif [ "$github_event_name" = pull_request ]; then
+            gh pr view "$github_event_pull_request_number" --json body -q .body >"$PR_DESCRIPTION"
+
+            POWPEG_BRANCH=$(get_branch_from_description fed)
+            : ${POWPEG_BRANCH:=${github_head_ref:-$default_powpeg_branch}}
+
+            RSKJ_BRANCH=$(get_branch_from_description rskj)
+            : ${RSKJ_BRANCH:=$default_rskj_branch}
+
+            RIT_BRANCH=$(get_branch_from_description rit)
+            : ${RIT_BRANCH:=$default_rit_branch}
+          else
+            RSKJ_BRANCH=$default_rskj_branch
+            POWPEG_BRANCH=$default_powpeg_branch
+            RIT_BRANCH=$default_rit_branch
+          fi
+
+          if ! is_valid_branch_name "$RSKJ_BRANCH"; then
+            echo "rskj: invalid branch name: $RSKJ_BRANCH" >&2
+            exit 1
+          fi
+          if ! is_valid_branch_name "$POWPEG_BRANCH"; then
+            echo "fed: invalid branch name: $POWPEG_BRANCH" >&2
+            exit 1
+          fi
+          if ! is_valid_branch_name "$RIT_BRANCH"; then
+            echo "rit: invalid branch name: $RIT_BRANCH" >&2
+            exit 1
+          fi
+
+          # Set the Repo Owner
+          REPO_OWNER="${github_event_pull_request_head_repo_owner_login:-$github_repository_owner}"
+
+          echo "REPO_OWNER=$REPO_OWNER" >> $GITHUB_ENV
+          echo "RSKJ_BRANCH=$RSKJ_BRANCH" >> $GITHUB_ENV
+          echo "RIT_BRANCH=$RIT_BRANCH" >> $GITHUB_ENV
+          echo "POWPEG_BRANCH=$POWPEG_BRANCH" >> $GITHUB_ENV
+
+      - name: Set Build URL
+        id: set-build-url
+        run: |
+          BUILD_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "BUILD_URL=$BUILD_URL" >> $GITHUB_ENV
+
+      - name: Sanitize Github Variables
+        id: sanitize-github-variables
+        env:
+          GITHUB_EVENT_PULL_REQUEST_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Delete non-alphanumeric characters and limit to 75 chars which is the branch title limit in GitHub
+          SAFE_PULL_REQUEST_TITLE=$(echo "${GITHUB_EVENT_PULL_REQUEST_TITLE}" | tr -cd '[:alnum:]_ -' | cut -c1-75)
+          echo "SAFE_PULL_REQUEST_TITLE=$SAFE_PULL_REQUEST_TITLE" >> $GITHUB_ENV
+
+      - name: Run Rootstock Integration Tests
+        uses: rsksmart/rootstock-integration-tests@main
+        with:
+          rskj-branch: ${{ env.RSKJ_BRANCH }}
+          powpeg-node-branch: ${{ env.POWPEG_BRANCH }}
+          rit-branch: ${{ env.RIT_BRANCH }}
+          repo-owner: ${{ env.REPO_OWNER }}
+
+      - name: Send Slack Notification on Success
+        if: success() && github.event.pull_request.head.repo.owner.login == 'rsksmart'
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a # v2.1.1
+        with:
+          token: ${{ secrets.GHA_SLACK_NOTIFICATION_TOKEN }}
+          method: chat.postMessage
+          payload: |
+            {
+              "channel": "${{ vars.GHA_SLACK_NOTIFICATION_CHANNEL }}",
+              "blocks": [
+                { "type": "header", "text": { "type": "plain_text", "text": "✅ PASSED — ${{ github.repository }} – PR #${{ github.event.pull_request.number }}", "emoji": true } },
+                {
+                  "type": "section",
+                  "text": { "type": "mrkdwn", "text": "*${{ env.SAFE_PULL_REQUEST_TITLE }}*" },
+                  "fields": [
+                    { "type": "mrkdwn", "text": "• rskj: `${{ env.RSKJ_BRANCH }}`\n• fed: `${{ env.POWPEG_BRANCH }}`\n• rit: `${{ env.RIT_BRANCH }}`" }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    { "type": "button", "text": { "type": "plain_text", "text": "Open PR" }, "url": "${{ github.event.pull_request.html_url }}" },
+                    { "type": "button", "text": { "type": "plain_text", "text": "View Actions Run" }, "url": "${{ env.BUILD_URL }}" }
+                  ]
+                }
+              ]
+            }
+
+      - name: Send Slack Notification on Failure
+        if: failure() && github.event.pull_request.head.repo.owner.login == 'rsksmart'
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a # v2.1.1
+        with:
+          token: ${{ secrets.GHA_SLACK_NOTIFICATION_TOKEN }}
+          method: chat.postMessage
+          payload: |
+            {
+              "channel": "${{ vars.GHA_SLACK_NOTIFICATION_CHANNEL }}",
+              "blocks": [
+                { "type": "header", "text": { "type": "plain_text", "text": "❌ FAILED — ${{ github.repository }} – PR #${{ github.event.pull_request.number }}", "emoji": true } },
+                {
+                  "type": "section",
+                  "text": { "type": "mrkdwn", "text": "*${{ env.SAFE_PULL_REQUEST_TITLE }}*" },
+                  "fields": [
+                    { "type": "mrkdwn", "text": "• rskj: `${{ env.RSKJ_BRANCH }}`\n• fed: `${{ env.POWPEG_BRANCH }}`\n• rit: `${{ env.RIT_BRANCH }}`" }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    { "type": "button", "style": "danger", "text": { "type": "plain_text", "text": "Open PR" }, "url": "${{ github.event.pull_request.html_url }}" },
+                    { "type": "button", "style": "danger", "text": { "type": "plain_text", "text": "View Actions Run" }, "url": "${{ env.BUILD_URL }}" }
+                  ]
+                }
+              ]
+            }

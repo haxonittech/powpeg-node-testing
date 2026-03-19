@@ -1,0 +1,53 @@
+name: Reproducible build
+on:
+  release:
+    types:
+      - created
+
+# Declare default permissions as read only.
+permissions: read-all
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container:
+      image: eclipse-temurin@sha256:3c76cd069517718b1952eb69678014d6b752502c9fa83409e31c34309ec309d5 # eclipse-temurin:17-jdk
+
+    steps:
+      - name: Install packages
+        run: |
+          apt-get update -y && apt-get install -y git curl gnupg
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+
+      - name: Set version
+        id: vars
+        run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
+
+      - name: Download Release key
+        run: |
+          gpg --keyserver https://secchannel.rsk.co/SUPPORT.asc --recv-keys 1DC9157991323D23FD37BAA7A6DBEAC640C5A14B
+
+      - name: Verify files integrity
+        run: |
+          gpg --verify --output SHA256SUMS SHA256SUMS.asc && sha256sum --check SHA256SUMS
+
+      - name: Build powpeg-node
+        run: |
+          ./configure.sh && ./gradlew --no-daemon clean build -x test
+
+      - name: Calculate hashes
+        working-directory: build/libs
+        run: |
+          sha256sum * > SHA256SUMS
+
+      - name: Print hashes
+        run: |
+          cat build/libs/SHA256SUMS
+
+      - name: Export artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6.0.0
+        with:
+          name: ${{ steps.vars.outputs.tag }}
+          path: build/libs/

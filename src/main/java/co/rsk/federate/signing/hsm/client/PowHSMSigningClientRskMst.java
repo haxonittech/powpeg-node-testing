@@ -1,0 +1,36 @@
+package co.rsk.federate.signing.hsm.client;
+
+import static co.rsk.federate.signing.HSMCommand.SIGN;
+import static co.rsk.federate.signing.HSMField.*;
+
+import co.rsk.federate.signing.hsm.HSMVersion;
+import co.rsk.federate.signing.hsm.message.SignerMessage;
+import co.rsk.federate.signing.hsm.message.SignerMessageV1;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.bouncycastle.util.encoders.Hex;
+
+public class PowHSMSigningClientRskMst extends PowHSMSigningClient {
+
+    public PowHSMSigningClientRskMst(HSMClientProtocol protocol, HSMVersion version) {
+        super(protocol, version);
+    }
+
+    @Override
+    protected final ObjectNode createObjectToSend(String keyId, SignerMessage message) {
+        SignerMessageV1 messageVersion1 = (SignerMessageV1) message;
+
+        ObjectNode objectToSign = this.hsmClientProtocol.buildCommand(SIGN.getCommand(), this.getVersion());
+        objectToSign.put(KEY_ID.getFieldName(), keyId);
+        objectToSign.set(MESSAGE.getFieldName(), createMessageField(messageVersion1));
+
+        return objectToSign;
+    }
+
+    private ObjectNode createMessageField(SignerMessageV1 messageVersion1) {
+        ObjectNode messageToSend = new ObjectMapper().createObjectNode();
+        messageToSend.put(HASH.getFieldName(), Hex.toHexString(messageVersion1.getBytes()));
+
+        return messageToSend;
+    }
+}
